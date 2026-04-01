@@ -1,0 +1,27 @@
+{
+  "antiSpam": {
+    "enabled": true,
+    "maxMessages": 5,
+    "interval": 3000,
+    "action": "timeout",
+    "timeoutDuration": 60000
+  },
+  "antiRaid": {
+    "enabled": true,
+    "maxJoins": 8,
+    "interval": 10000
+  },
+  "antiNuke": {
+    "enabled": true,
+    "maxActions": 3,
+    "interval": 10000
+  },
+  "antiLink": {
+    "enabled": false,
+    "whitelist": []
+  },
+  "rateLimit": {
+    "enabled": true,
+    "cooldown": 2000
+  }
+}
