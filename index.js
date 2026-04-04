@@ -3,7 +3,6 @@ const {
   Client,
   GatewayIntentBits,
   ActivityType,
-  EmbedBuilder,
   PermissionFlagsBits,
   AttachmentBuilder,
   ActionRowBuilder,
@@ -14,65 +13,45 @@ const {
   StringSelectMenuOptionBuilder,
   ChannelType,
 } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
-const sharp = require('sharp');
-const { GIFEncoder, quantize, applyPalette } = require('gifenc');
 const discordTranscripts = require('discord-html-transcripts');
 
-const PREFIX = process.env.PREFIX || '$';
-const OWNER_USERNAME = process.env.OWNER_USERNAME || 'owner';
-const AUTHORIZED_USERNAMES = (process.env.AUTHORIZED_USERNAMES || '')
-  .split(',')
-  .map((s) => s.trim().replace(/^@/, '').toLowerCase())
-  .filter(Boolean);
-const BLACKLIST_PATH = path.join(__dirname, 'blacklist.json');
-const PROTECTION_PATH = path.join(__dirname, 'protection.json');
-const TICKETS_PATH = path.join(__dirname, 'tickets_config.json');
-const LOGS_PATH = path.join(__dirname, 'logs_config.json');
-const AUTOROLE_PATH = path.join(__dirname, 'autorole.json');
-
-const BRAND = {
-  name: 'JewishDiscordBot',
-  footer: '⚡ JewishDiscordBot',
-  colors: {
-    primary: 0x5865f2,
-    success: 0x57f287,
-    warning: 0xfee75c,
-    danger: 0xed4245,
-    dark: 0x2b2d31,
-    info: 0x5bc0eb,
-    purple: 0x9b59b6,
-    pink: 0xe91e63,
-    orange: 0xe67e22,
-  },
-};
-
-const DEFAULT_PROTECTION = {
-  antiSpam: { enabled: true, maxMessages: 5, interval: 3000, action: 'timeout', timeoutDuration: 60000 },
-  antiRaid: { enabled: true, maxJoins: 8, interval: 10000, lockServer: false },
-  antiNuke: { enabled: true, maxActions: 3, interval: 10000, maxBans: 5, maxKicks: 5 },
-  antiLink: { enabled: false, whitelist: [], action: 'delete' },
-  rateLimit: { enabled: true, cooldown: 2000 },
-};
+const {
+  PREFIX,
+  OWNER_USERNAME,
+  BRAND,
+  TICKET_TYPE_SLUG,
+  TICKET_REASON_LABELS,
+  ROOT_ROLE_NAME,
+} = require('./lib/config');
+const { log, co } = require('./lib/logger');
+const { makeEmbed } = require('./lib/embeds');
+const { isAuthorized } = require('./lib/auth');
+const { parseDuration, formatDuration } = require('./lib/duration');
+const {
+  getImageBuffer,
+  imageToGif,
+  deepfryImage,
+  invertImage,
+  blurImage,
+  pixelateImage,
+} = require('./lib/images');
+const {
+  loadBlacklist,
+  saveBlacklist,
+  loadProtection,
+  saveProtection,
+  loadTickets,
+  saveTickets,
+  loadLogs,
+  saveLogs,
+  loadAutoRole,
+  saveAutoRole,
+} = require('./lib/store');
 
 const spamTracker = new Map();
 const joinTracker = [];
 const nukeTracker = new Map();
 const cooldownTracker = new Map();
-
-const co = {
-  reset: '\x1b[0m',
-  bold: '\x1b[1m',
-  dim: '\x1b[2m',
-  cyan: '\x1b[36m',
-  green: '\x1b[32m',
-  yellow: '\x1b[33m',
-  red: '\x1b[31m',
-  magenta: '\x1b[35m',
-  blue: '\x1b[34m',
-  white: '\x1b[37m',
-};
 
 const client = new Client({
   intents: [
@@ -84,87 +63,6 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
   ],
 });
-function loadBlacklist() {
-  try {
-    return JSON.parse(fs.readFileSync(BLACKLIST_PATH, 'utf-8'));
-  } catch {
-    return [];
-  }
-}
-
-function saveBlacklist(list) {
-  fs.writeFileSync(BLACKLIST_PATH, JSON.stringify(list, null, 2));
-}
-
-
-function loadProtection() {
-  try {
-    const data = JSON.parse(fs.readFileSync(PROTECTION_PATH, 'utf-8'));
-    return { ...DEFAULT_PROTECTION, ...data };
-  } catch {
-    return { ...DEFAULT_PROTECTION };
-  }
-}
-
-function saveProtection(config) {
-  fs.writeFileSync(PROTECTION_PATH, JSON.stringify(config, null, 2));
-}
-
-
-const DEFAULT_TICKETS = { openCategoryId: null, closedCategoryId: null, ticketCount: 0 };
-
-/** Maps select value → URL-safe channel name prefix (lowercase, hyphens). */
-const TICKET_TYPE_SLUG = {
-  support: 'support',
-  purchase: 'purchase',
-  get_channel: 'get-channel',
-  report: 'report',
-};
-
-function loadTickets() {
-  try {
-    const data = JSON.parse(fs.readFileSync(TICKETS_PATH, 'utf-8'));
-    return { ...DEFAULT_TICKETS, ...data };
-  } catch {
-    return { ...DEFAULT_TICKETS };
-  }
-}
-
-function saveTickets(config) {
-  fs.writeFileSync(TICKETS_PATH, JSON.stringify(config, null, 2));
-}
-
-
-const DEFAULT_LOGS = { channelId: null };
-
-function loadLogs() {
-  try {
-    const data = JSON.parse(fs.readFileSync(LOGS_PATH, 'utf-8'));
-    return { ...DEFAULT_LOGS, ...data };
-  } catch {
-    return { ...DEFAULT_LOGS };
-  }
-}
-
-function saveLogs(config) {
-  fs.writeFileSync(LOGS_PATH, JSON.stringify(config, null, 2));
-}
-
-
-const DEFAULT_AUTOROLE = { roleId: null };
-
-function loadAutoRole() {
-  try {
-    const data = JSON.parse(fs.readFileSync(AUTOROLE_PATH, 'utf-8'));
-    return { ...DEFAULT_AUTOROLE, ...data };
-  } catch {
-    return { ...DEFAULT_AUTOROLE };
-  }
-}
-
-function saveAutoRole(config) {
-  fs.writeFileSync(AUTOROLE_PATH, JSON.stringify(config, null, 2));
-}
 
 async function getLogChannel(guild) {
   const config = loadLogs();
@@ -175,185 +73,8 @@ async function getLogChannel(guild) {
   return null;
 }
 
-
-function makeEmbed({
-  title,
-  description,
-  color = BRAND.colors.dark,
-  fields = [],
-  thumbnail = null,
-  footer,
-  timestamp: useTimestamp = true,
-  includeAuthor = true,
-}) {
-  const embed = new EmbedBuilder().setTitle(title).setDescription(description).setColor(color);
-
-  const footerText = footer === undefined ? BRAND.footer : footer;
-  if (footerText) embed.setFooter({ text: footerText });
-  if (useTimestamp) embed.setTimestamp();
-  if (includeAuthor && client.user) {
-    embed.setAuthor({ name: BRAND.name, iconURL: client.user.displayAvatarURL() });
-  }
-
-  if (fields.length > 0) embed.addFields(fields);
-  if (thumbnail) embed.setThumbnail(thumbnail);
-
-  return embed;
-}
-
-
-function parseDuration(args) {
-  const amount = parseInt(args[0], 10);
-  if (isNaN(amount) || amount <= 0) return null;
-
-  const unit = (args[1] || 'min').toLowerCase();
-  const multipliers = {
-    sec: 1000, secs: 1000, second: 1000, seconds: 1000, s: 1000,
-    min: 60_000, mins: 60_000, minute: 60_000, minutes: 60_000, m: 60_000,
-    hour: 3_600_000, hours: 3_600_000, hr: 3_600_000, hrs: 3_600_000, h: 3_600_000,
-    day: 86_400_000, days: 86_400_000, d: 86_400_000,
-  };
-
-  const ms = multipliers[unit];
-  return ms ? amount * ms : null;
-}
-
-function formatDuration(ms) {
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const h = Math.floor(m / 60);
-  const d = Math.floor(h / 24);
-  if (d > 0) return `${d}d ${h % 24}h`;
-  if (h > 0) return `${h}h ${m % 60}m`;
-  if (m > 0) return `${m}m ${s % 60}s`;
-  return `${s}s`;
-}
-
-
-function log(type, message) {
-  const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
-  const prefix = `${co.dim}${time}${co.reset}`;
-  const types = {
-    info: `${co.cyan}ℹ INFO ${co.reset}`,
-    success: `${co.green}✓ OK   ${co.reset}`,
-    warn: `${co.yellow}⚠ WARN ${co.reset}`,
-    error: `${co.red}✗ ERR  ${co.reset}`,
-    mod: `${co.magenta}⚔ MOD  ${co.reset}`,
-    event: `${co.blue}★ EVT  ${co.reset}`,
-    img: `${co.yellow}🖼 IMG  ${co.reset}`,
-  };
-  console.log(`  ${prefix}  ${types[type] || types.info}  ${message}`);
-}
-
-function isAuthorized(member) {
-  const u = member.user.username.toLowerCase();
-  if (u === OWNER_USERNAME.toLowerCase()) return true;
-  if (AUTHORIZED_USERNAMES.includes(u)) return true;
-  return false;
-}
-
-async function getImageBuffer(message, args) {
-  const attachment = message.attachments.first();
-  if (attachment && attachment.contentType?.startsWith('image/')) {
-    const res = await fetch(attachment.url);
-    return Buffer.from(await res.arrayBuffer());
-  }
-
-  const url = args.find(a => /^https?:\/\/.+/i.test(a));
-  if (url) {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Failed to fetch image (HTTP ${res.status})`);
-    return Buffer.from(await res.arrayBuffer());
-  }
-
-  if (message.reference) {
-    try {
-      const replied = await message.channel.messages.fetch(message.reference.messageId);
-      const repliedAttachment = replied.attachments.first();
-      if (repliedAttachment && repliedAttachment.contentType?.startsWith('image/')) {
-        const res = await fetch(repliedAttachment.url);
-        return Buffer.from(await res.arrayBuffer());
-      }
-    } catch { }
-  }
-
-  return null;
-}
-
-
-async function imageToGif(buffer) {
-  const size = 256;
-  const numFrames = 16;
-  const gif = GIFEncoder();
-
-  for (let i = 0; i < numFrames; i++) {
-    const t = i / numFrames;
-    const brightness = 0.75 + 0.4 * Math.sin(t * Math.PI * 2);
-    const hue = Math.round(t * 120);
-
-    const { data } = await sharp(buffer)
-      .resize(size, size, { fit: 'cover' })
-      .modulate({ brightness, hue })
-      .removeAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const rgba = new Uint8Array(size * size * 4);
-    for (let j = 0; j < size * size; j++) {
-      rgba[j * 4] = data[j * 3];
-      rgba[j * 4 + 1] = data[j * 3 + 1];
-      rgba[j * 4 + 2] = data[j * 3 + 2];
-      rgba[j * 4 + 3] = 255;
-    }
-
-    const palette = quantize(rgba, 256);
-    const index = applyPalette(rgba, palette);
-    gif.writeFrame(index, size, size, { palette, delay: 80 });
-  }
-
-  gif.finish();
-  return Buffer.from(gif.bytes());
-}
-
-async function deepfryImage(buffer) {
-  const jpeg = await sharp(buffer)
-    .resize(512, 512, { fit: 'inside' })
-    .modulate({ saturation: 3.5, brightness: 1.3 })
-    .sharpen({ sigma: 5 })
-    .jpeg({ quality: 3 })
-    .toBuffer();
-
-  return sharp(jpeg)
-    .modulate({ saturation: 2.5 })
-    .sharpen({ sigma: 4 })
-    .png()
-    .toBuffer();
-}
-
-async function invertImage(buffer) {
-  return sharp(buffer)
-    .resize(512, 512, { fit: 'inside' })
-    .negate({ alpha: false })
-    .png()
-    .toBuffer();
-}
-
-async function blurImage(buffer) {
-  return sharp(buffer)
-    .resize(512, 512, { fit: 'inside' })
-    .blur(15)
-    .png()
-    .toBuffer();
-}
-
-async function pixelateImage(buffer) {
-  return sharp(buffer)
-    .resize(24, 24, { fit: 'cover' })
-    .resize(512, 512, { fit: 'cover', kernel: 'nearest' })
-    .png()
-    .toBuffer();
-}
-
+/** Prefix commands we document in $help (approximate; aliases not double-counted). */
+const KNOWN_COMMAND_COUNT = 32;
 
 const activities = [
   { name: '🛡️ Protecting the server', type: ActivityType.Custom },
@@ -400,11 +121,11 @@ client.once('ready', async () => {
   log('info', `Owner: ${co.yellow}${OWNER_USERNAME}${co.reset}`);
   log('info', `Servers: ${co.yellow}${client.guilds.cache.size}${co.reset}`);
   log('info', `Users: ${co.yellow}${client.guilds.cache.reduce((a, g) => a + g.memberCount, 0)}${co.reset}`);
-  log('info', `Commands: ${co.yellow}30${co.reset}`);
+  log('info', `Commands: ${co.yellow}${KNOWN_COMMAND_COUNT}${co.reset}`);
   log('info', `Blacklisted: ${co.yellow}${loadBlacklist().length}${co.reset}`);
 
   console.log(`\n  ${co.dim}─────────────────────────────────────────${co.reset}`);
-  log('success', `${co.green}Bot ready — only ${co.bold}${OWNER_USERNAME}${co.reset}${co.green} can use commands${co.reset}`);
+  log('success', `${co.green}Bot ready — commands restricted to owner / authorized users / ${co.bold}root${co.reset}${co.green} role${co.reset}`);
   console.log(`  ${co.dim}─────────────────────────────────────────${co.reset}\n`);
 
   rotateActivity();
@@ -436,10 +157,113 @@ client.once('ready', async () => {
 });
 
 
+const LINK_FILTER_REGEX =
+  /(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/\S+|(?:https?:\/\/)?(?:www\.)?[a-zA-Z0-9-]+\.(?:com|net|org|edu|gov|mil|biz|info|mobi|name|aero|asia|jobs|museum|gg|io|me|tv|xyz|link|top|pw|club|online|site|store|tech|website|space|fun|host|press|live|icu|vip|work|tk|ml|ga|cf|gq)(?:\/\S*)?/gi;
+
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
+  if (message.author.bot || !message.guild) return;
+  const prot = loadProtection();
+
+  if (prot.antiSpam.enabled && message.member && !isAuthorized(message.member)) {
+    const userId = message.author.id;
+    const now = Date.now();
+    if (!spamTracker.has(userId)) spamTracker.set(userId, []);
+    const timestamps = spamTracker.get(userId);
+    timestamps.push(now);
+    const filtered = timestamps.filter((t) => now - t < prot.antiSpam.interval);
+    spamTracker.set(userId, filtered);
+
+    if (filtered.length >= prot.antiSpam.maxMessages) {
+      spamTracker.delete(userId);
+      log(
+        'event',
+        `${co.red}🚫 ANTI-SPAM${co.reset} ${message.author.tag} — ${filtered.length} msgs in ${prot.antiSpam.interval / 1000}s`
+      );
+      try {
+        const recentMessages = await message.channel.messages.fetch({ limit: prot.antiSpam.maxMessages + 5 });
+        const spamMessages = recentMessages.filter((m) => m.author.id === userId);
+        await message.channel.bulkDelete(spamMessages, true).catch(() => {});
+        if (message.member?.moderatable) {
+          await message.member.timeout(prot.antiSpam.timeoutDuration, 'Anti-Spam: Message flooding');
+        }
+        const channel = message.guild.systemChannel || message.channel;
+        channel.send({
+          embeds: [
+            makeEmbed(client, {
+              title: '🚫 Anti-Spam Triggered',
+              description: `**${message.author.tag}** has been timed out for spam.`,
+              color: BRAND.colors.danger,
+              fields: [
+                { name: '👤 User', value: `${message.author.tag}`, inline: true },
+                { name: '⏳ Duration', value: `\`${formatDuration(prot.antiSpam.timeoutDuration)}\``, inline: true },
+                {
+                  name: '📝 Reason',
+                  value: `${filtered.length} messages in ${prot.antiSpam.interval / 1000}s`,
+                  inline: true,
+                },
+              ],
+            }),
+          ],
+        });
+      } catch (err) {
+        log('error', `Anti-spam action failed: ${err.message}`);
+      }
+      return;
+    }
+  }
+
+  if (prot.antiLink.enabled && message.member && !isAuthorized(message.member)) {
+    LINK_FILTER_REGEX.lastIndex = 0;
+    if (LINK_FILTER_REGEX.test(message.content)) {
+      const isWhitelisted = prot.antiLink.whitelist?.some((domain) => message.content.includes(domain));
+      if (!isWhitelisted) {
+        log('event', `${co.red}🔗 ANTI-LINK${co.reset} ${message.author.tag} sent a link in #${message.channel.name}`);
+        try {
+          await message.delete();
+          const warn = await message.channel.send({
+            embeds: [
+              makeEmbed(client, {
+                title: '🔗 Link Removed',
+                description: `**${message.author.tag}**, links are not allowed in this server.`,
+                color: BRAND.colors.warning,
+              }),
+            ],
+          });
+          setTimeout(() => warn.delete().catch(() => {}), 5000);
+        } catch (err) {
+          log('error', `Anti-link action failed: ${err.message}`);
+        }
+        return;
+      }
+    }
+  }
+
   if (!message.content.startsWith(PREFIX)) return;
-  if (!message.guild) return;
+
+  if (prot.rateLimit.enabled && message.member && !isAuthorized(message.member)) {
+    const userId = message.author.id;
+    const now = Date.now();
+    const lastUsed = cooldownTracker.get(userId) || 0;
+    if (now - lastUsed < prot.rateLimit.cooldown) {
+      const remaining = Math.ceil((prot.rateLimit.cooldown - (now - lastUsed)) / 1000);
+      try {
+        const warn = await message.reply({
+          embeds: [
+            makeEmbed(client, {
+              title: '⏱️ Slow Down!',
+              description: `Please wait **${remaining}s** before using another command.`,
+              color: BRAND.colors.warning,
+            }),
+          ],
+        });
+        setTimeout(() => warn.delete().catch(() => {}), 3000);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    cooldownTracker.set(userId, now);
+  }
 
   const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
   const command = args.shift().toLowerCase();
@@ -448,12 +272,16 @@ client.on('messageCreate', async (message) => {
 
   if (!isAuthorized(message.member)) {
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '⛔ Access Denied',
-        description: 'You are not authorized to use my commands.',
+        description: 'You are not allowed to use bot commands on this server.',
         color: BRAND.colors.danger,
         fields: [
-          { name: 'Required', value: `Username **${OWNER_USERNAME}**`, inline: false },
+          {
+            name: 'Who can use commands',
+            value: `Owner username in \`.env\`, users in \`AUTHORIZED_USERNAMES\`, or the **root** role.`,
+            inline: false,
+          },
         ],
       })],
     });
@@ -463,9 +291,9 @@ client.on('messageCreate', async (message) => {
 
   if (command === 'help') {
     return message.reply({
-      embeds: [makeEmbed({
-        title: '📖Commands',
-        description: 'Sexy Commands\n\u200b',
+      embeds: [makeEmbed(client, {
+        title: '📖 Commands',
+        description: 'Prefix commands for moderation, fun, and server setup.\n\u200b',
         color: BRAND.colors.primary,
         fields: [
           {
@@ -554,7 +382,7 @@ client.on('messageCreate', async (message) => {
 
   if (command === 'ping') {
     const sent = await message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🏓 Pinging...',
         description: 'Measuring latency...',
         color: BRAND.colors.info,
@@ -565,7 +393,7 @@ client.on('messageCreate', async (message) => {
     const wsLatency = Math.round(client.ws.ping);
 
     return sent.edit({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🏓 Pong!',
         description: 'Latency measured successfully.',
         color: BRAND.colors.success,
@@ -578,15 +406,11 @@ client.on('messageCreate', async (message) => {
     });
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-
-
-
   if (command === 'role') {
     const targetRole = message.mentions.roles.first() || message.guild.roles.cache.get(args[0]);
     if (!targetRole) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Set Auto-Role',
           description: 'Set the role that will be automatically assigned to new members.',
           color: BRAND.colors.warning,
@@ -601,7 +425,7 @@ client.on('messageCreate', async (message) => {
     log('info', `${co.green}AUTO-ROLE${co.reset} Role updated to ${targetRole.name}`);
 
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '✅ Auto-Role Updated',
         description: `New members will now automatically receive the ${targetRole.toString()} role.`,
         color: BRAND.colors.success,
@@ -613,7 +437,7 @@ client.on('messageCreate', async (message) => {
     const targetChannel = message.mentions.channels.first();
     if (!targetChannel) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Set Logs',
           description: 'Set the channel where audit logs will be sent.',
           color: BRAND.colors.warning,
@@ -628,7 +452,7 @@ client.on('messageCreate', async (message) => {
     log('info', `${co.green}SET LOGS${co.reset} Channel updated to #${targetChannel.name}`);
 
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '✅ Logs Channel Updated',
         description: `Audit logs and transcripts will now be sent to ${targetChannel.toString()}.`,
         color: BRAND.colors.success,
@@ -641,7 +465,7 @@ client.on('messageCreate', async (message) => {
     const openCat = config.openCategoryId ? `<#${config.openCategoryId}>` : 'Not Set';
     const closedCat = config.closedCategoryId ? `<#${config.closedCategoryId}>` : 'Not Set';
 
-    const embed = makeEmbed({
+    const embed = makeEmbed(client, {
       title: '🎫 Ticket System Setup',
       description: 'Configure your ticket system categories or send the ticket creation panel to this channel.',
       color: BRAND.colors.primary,
@@ -679,7 +503,7 @@ client.on('messageCreate', async (message) => {
     const target = message.mentions.members.first();
     if (!target) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Ban',
           description: 'Permanently ban a user from the server.',
           color: BRAND.colors.warning,
@@ -692,7 +516,7 @@ client.on('messageCreate', async (message) => {
 
     if (!target.bannable) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '❌ Cannot Ban',
           description: `Cannot ban **${target.user.tag}** — they may have a higher role.`,
           color: BRAND.colors.danger,
@@ -704,7 +528,7 @@ client.on('messageCreate', async (message) => {
       await target.ban({ reason: `Banned by ${message.author.tag}` });
       log('mod', `${co.red}BAN${co.reset} ${target.user.tag} by ${message.author.tag}`);
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '🔨 User Banned',
           description: `**${target.user.tag}** has been permanently banned.`,
           color: BRAND.colors.danger,
@@ -718,7 +542,7 @@ client.on('messageCreate', async (message) => {
       });
     } catch (err) {
       log('error', `Ban failed: ${err.message}`);
-      return message.reply({ embeds: [makeEmbed({ title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
+      return message.reply({ embeds: [makeEmbed(client, { title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
     }
   }
 
@@ -726,7 +550,7 @@ client.on('messageCreate', async (message) => {
     const target = message.mentions.members.first();
     if (!target) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Kick',
           description: 'Kick a user from the server.',
           color: BRAND.colors.warning,
@@ -739,7 +563,7 @@ client.on('messageCreate', async (message) => {
 
     if (!target.kickable) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '❌ Cannot Kick',
           description: `Cannot kick **${target.user.tag}** — they may have a higher role.`,
           color: BRAND.colors.danger,
@@ -751,7 +575,7 @@ client.on('messageCreate', async (message) => {
       await target.kick(`Kicked by ${message.author.tag}`);
       log('mod', `${co.yellow}KICK${co.reset} ${target.user.tag} by ${message.author.tag}`);
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '👢 User Kicked',
           description: `**${target.user.tag}** has been kicked from the server.`,
           color: BRAND.colors.warning,
@@ -765,7 +589,7 @@ client.on('messageCreate', async (message) => {
       });
     } catch (err) {
       log('error', `Kick failed: ${err.message}`);
-      return message.reply({ embeds: [makeEmbed({ title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
+      return message.reply({ embeds: [makeEmbed(client, { title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
     }
   }
 
@@ -773,7 +597,7 @@ client.on('messageCreate', async (message) => {
     const target = message.mentions.members.first();
     if (!target) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Timeout',
           description: 'Temporarily mute a user.',
           color: BRAND.colors.warning,
@@ -791,7 +615,7 @@ client.on('messageCreate', async (message) => {
 
     if (!duration) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '⚠️ Invalid Duration',
           description: 'Provide a valid duration like `10 min` or `2 hours`.',
           color: BRAND.colors.warning,
@@ -801,7 +625,7 @@ client.on('messageCreate', async (message) => {
 
     if (duration > 28 * 86_400_000) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '❌ Duration Too Long',
           description: 'Timeout cannot exceed **28 days**.',
           color: BRAND.colors.danger,
@@ -811,7 +635,7 @@ client.on('messageCreate', async (message) => {
 
     if (!target.moderatable) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '❌ Cannot Timeout',
           description: `Cannot timeout **${target.user.tag}** — they may have a higher role.`,
           color: BRAND.colors.danger,
@@ -824,7 +648,7 @@ client.on('messageCreate', async (message) => {
       const readable = formatDuration(duration);
       log('mod', `${co.blue}TIMEOUT${co.reset} ${target.user.tag} for ${readable} by ${message.author.tag}`);
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '⏱️ User Timed Out',
           description: `**${target.user.tag}** has been timed out.`,
           color: BRAND.colors.primary,
@@ -838,7 +662,7 @@ client.on('messageCreate', async (message) => {
       });
     } catch (err) {
       log('error', `Timeout failed: ${err.message}`);
-      return message.reply({ embeds: [makeEmbed({ title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
+      return message.reply({ embeds: [makeEmbed(client, { title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
     }
   }
 
@@ -846,7 +670,7 @@ client.on('messageCreate', async (message) => {
     const count = parseInt(args[0], 10);
     if (isNaN(count) || count < 1 || count > 100) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Purge',
           description: 'Bulk delete messages in this channel.',
           color: BRAND.colors.warning,
@@ -863,7 +687,7 @@ client.on('messageCreate', async (message) => {
       log('mod', `${co.red}PURGE${co.reset} ${deleted.size - 1} messages in #${message.channel.name} by ${message.author.tag}`);
 
       const confirm = await message.channel.send({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '🗑️ Messages Purged',
           description: `Deleted **${deleted.size - 1}** messages.`,
           color: BRAND.colors.success,
@@ -878,7 +702,7 @@ client.on('messageCreate', async (message) => {
       setTimeout(() => confirm.delete().catch(() => { }), 5000);
     } catch (err) {
       log('error', `Purge failed: ${err.message}`);
-      return message.reply({ embeds: [makeEmbed({ title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
+      return message.reply({ embeds: [makeEmbed(client, { title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
     }
     return;
   }
@@ -887,7 +711,7 @@ client.on('messageCreate', async (message) => {
     const target = message.mentions.users.first();
     if (!target) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Blacklist',
           description: 'Add a user to the blacklist. They will be auto-kicked on join.',
           color: BRAND.colors.warning,
@@ -906,7 +730,7 @@ client.on('messageCreate', async (message) => {
     const existing = blacklist.find(e => e.userId === target.id);
     if (existing) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '⚠️ Already Blacklisted',
           description: `**${target.tag}** is already on the blacklist.`,
           color: BRAND.colors.warning,
@@ -931,7 +755,7 @@ client.on('messageCreate', async (message) => {
     log('mod', `${co.magenta}BLACKLIST${co.reset} ${target.tag} — "${reason}" by ${message.author.tag}`);
 
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🚫 User Blacklisted',
         description: `**${target.tag}** has been added to the blacklist.`,
         color: BRAND.colors.dark,
@@ -949,7 +773,7 @@ client.on('messageCreate', async (message) => {
     const target = message.mentions.users.first();
     if (!target) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Unblacklist',
           description: 'Remove a user from the blacklist.',
           color: BRAND.colors.warning,
@@ -963,7 +787,7 @@ client.on('messageCreate', async (message) => {
 
     if (index === -1) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '⚠️ Not Found',
           description: `**${target.tag}** is not on the blacklist.`,
           color: BRAND.colors.warning,
@@ -976,7 +800,7 @@ client.on('messageCreate', async (message) => {
     log('mod', `${co.green}UNBLACKLIST${co.reset} ${target.tag} by ${message.author.tag}`);
 
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '✅ User Unblacklisted',
         description: `**${target.tag}** has been removed from the blacklist.`,
         color: BRAND.colors.success,
@@ -994,7 +818,7 @@ client.on('messageCreate', async (message) => {
 
     if (blacklist.length === 0) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📋 Server Blacklist',
           description: '```\n  The blacklist is empty.  \n```\nNo users are currently blacklisted.',
           color: BRAND.colors.primary,
@@ -1008,7 +832,7 @@ client.on('messageCreate', async (message) => {
     }).join('\n\n');
 
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: `📋 Server Blacklist — ${blacklist.length} user${blacklist.length !== 1 ? 's' : ''}`,
         description: list,
         color: BRAND.colors.primary,
@@ -1017,14 +841,11 @@ client.on('messageCreate', async (message) => {
     });
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-
-
   if (command === 'imgtogif') {
     const buffer = await getImageBuffer(message, args);
     if (!buffer) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Image to GIF',
           description: 'Convert an image into an animated GIF with a pulse effect.',
           color: BRAND.colors.warning,
@@ -1037,7 +858,7 @@ client.on('messageCreate', async (message) => {
     }
 
     const processing = await message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '⏳ Processing...',
         description: 'Creating animated GIF — this may take a moment.',
         color: BRAND.colors.info,
@@ -1050,7 +871,7 @@ client.on('messageCreate', async (message) => {
 
       await processing.delete().catch(() => { });
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '🎞️ Animated GIF Created',
           description: 'Here is your animated image!',
           color: BRAND.colors.success,
@@ -1060,7 +881,7 @@ client.on('messageCreate', async (message) => {
     } catch (err) {
       log('error', `ImgToGif failed: ${err.message}`);
       await processing.delete().catch(() => { });
-      return message.reply({ embeds: [makeEmbed({ title: '❌ Error', description: `Failed to process image: \`${err.message}\``, color: BRAND.colors.danger })] });
+      return message.reply({ embeds: [makeEmbed(client, { title: '❌ Error', description: `Failed to process image: \`${err.message}\``, color: BRAND.colors.danger })] });
     }
   }
 
@@ -1068,7 +889,7 @@ client.on('messageCreate', async (message) => {
     const buffer = await getImageBuffer(message, args);
     if (!buffer) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Deep Fry',
           description: 'Deep-fry an image for maximum meme quality.',
           color: BRAND.colors.warning,
@@ -1081,7 +902,7 @@ client.on('messageCreate', async (message) => {
     }
 
     const processing = await message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🔥 Deep Frying...',
         description: 'Cranking up the saturation...',
         color: BRAND.colors.orange,
@@ -1094,7 +915,7 @@ client.on('messageCreate', async (message) => {
 
       await processing.delete().catch(() => { });
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '🔥 Deep Fried!',
           description: 'Your image has been deep fried to perfection.',
           color: BRAND.colors.orange,
@@ -1104,7 +925,7 @@ client.on('messageCreate', async (message) => {
     } catch (err) {
       log('error', `Deepfry failed: ${err.message}`);
       await processing.delete().catch(() => { });
-      return message.reply({ embeds: [makeEmbed({ title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
+      return message.reply({ embeds: [makeEmbed(client, { title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
     }
   }
 
@@ -1112,7 +933,7 @@ client.on('messageCreate', async (message) => {
     const buffer = await getImageBuffer(message, args);
     if (!buffer) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Invert',
           description: 'Invert the colors of an image.',
           color: BRAND.colors.warning,
@@ -1125,11 +946,11 @@ client.on('messageCreate', async (message) => {
       const result = await invertImage(buffer);
       log('img', `${co.magenta}INVERT${co.reset} by ${message.author.tag}`);
       return message.reply({
-        embeds: [makeEmbed({ title: '🔄 Colors Inverted!', description: 'Image colors have been inverted.', color: BRAND.colors.purple })],
+        embeds: [makeEmbed(client, { title: '🔄 Colors Inverted!', description: 'Image colors have been inverted.', color: BRAND.colors.purple })],
         files: [new AttachmentBuilder(result, { name: 'inverted.png' })],
       });
     } catch (err) {
-      return message.reply({ embeds: [makeEmbed({ title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
+      return message.reply({ embeds: [makeEmbed(client, { title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
     }
   }
 
@@ -1137,7 +958,7 @@ client.on('messageCreate', async (message) => {
     const buffer = await getImageBuffer(message, args);
     if (!buffer) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Blur',
           description: 'Apply a gaussian blur to an image.',
           color: BRAND.colors.warning,
@@ -1150,11 +971,11 @@ client.on('messageCreate', async (message) => {
       const result = await blurImage(buffer);
       log('img', `${co.blue}BLUR${co.reset} by ${message.author.tag}`);
       return message.reply({
-        embeds: [makeEmbed({ title: '🌫️ Image Blurred!', description: 'Gaussian blur applied.', color: BRAND.colors.info })],
+        embeds: [makeEmbed(client, { title: '🌫️ Image Blurred!', description: 'Gaussian blur applied.', color: BRAND.colors.info })],
         files: [new AttachmentBuilder(result, { name: 'blurred.png' })],
       });
     } catch (err) {
-      return message.reply({ embeds: [makeEmbed({ title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
+      return message.reply({ embeds: [makeEmbed(client, { title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
     }
   }
 
@@ -1162,7 +983,7 @@ client.on('messageCreate', async (message) => {
     const buffer = await getImageBuffer(message, args);
     if (!buffer) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Pixelate',
           description: 'Pixelate an image.',
           color: BRAND.colors.warning,
@@ -1175,11 +996,11 @@ client.on('messageCreate', async (message) => {
       const result = await pixelateImage(buffer);
       log('img', `${co.green}PIXEL${co.reset} by ${message.author.tag}`);
       return message.reply({
-        embeds: [makeEmbed({ title: '🟩 Image Pixelated!', description: 'Your image has been pixelated.', color: BRAND.colors.success })],
+        embeds: [makeEmbed(client, { title: '🟩 Image Pixelated!', description: 'Your image has been pixelated.', color: BRAND.colors.success })],
         files: [new AttachmentBuilder(result, { name: 'pixelated.png' })],
       });
     } catch (err) {
-      return message.reply({ embeds: [makeEmbed({ title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
+      return message.reply({ embeds: [makeEmbed(client, { title: '❌ Error', description: `\`${err.message}\``, color: BRAND.colors.danger })] });
     }
   }
 
@@ -1190,7 +1011,7 @@ client.on('messageCreate', async (message) => {
     const avatarURL = target.displayAvatarURL({ size: 1024, dynamic: true });
 
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: `🖼️ ${target.tag}'s Avatar`,
         description: `[Open in browser](${avatarURL})`,
         color: BRAND.colors.primary,
@@ -1206,7 +1027,7 @@ client.on('messageCreate', async (message) => {
     const voiceChannels = channels.filter(c => c.type === 2).size;
 
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: `ℹ️ ${guild.name}`,
         description: guild.description || '*No description set.*',
         color: BRAND.colors.primary,
@@ -1236,7 +1057,7 @@ client.on('messageCreate', async (message) => {
       .slice(0, 10);
 
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: `ℹ️ ${user.tag}`,
         description: `${user.toString()} · \`${user.id}\``,
         color: target.displayColor || BRAND.colors.primary,
@@ -1257,7 +1078,7 @@ client.on('messageCreate', async (message) => {
     const question = args.join(' ');
     if (!question) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '🎱 Magic 8-Ball',
           description: 'You need to ask a question!',
           color: BRAND.colors.warning,
@@ -1270,7 +1091,7 @@ client.on('messageCreate', async (message) => {
     const colorMap = { positive: BRAND.colors.success, neutral: BRAND.colors.warning, negative: BRAND.colors.danger };
 
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🎱 Magic 8-Ball',
         description: `**Q:** ${question}\n\n**A:** *${response.text}*`,
         color: colorMap[response.type],
@@ -1278,11 +1099,10 @@ client.on('messageCreate', async (message) => {
     });
   }
 
-  // ── $coinflip ───────────────────────────────────────────────────────────
   if (command === 'coinflip') {
     const result = Math.random() < 0.5;
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🪙 Coin Flip',
         description: `The coin landed on...\n\n# ${result ? '🌕 Heads!' : '🌑 Tails!'}`,
         color: result ? BRAND.colors.success : BRAND.colors.info,
@@ -1290,12 +1110,11 @@ client.on('messageCreate', async (message) => {
     });
   }
 
-  // ── $roll [sides] ──────────────────────────────────────────────────────
   if (command === 'roll') {
     const sides = parseInt(args[0], 10) || 6;
     if (sides < 2 || sides > 1000) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '⚠️ Invalid',
           description: 'Sides must be between 2 and 1000.',
           color: BRAND.colors.warning,
@@ -1305,7 +1124,7 @@ client.on('messageCreate', async (message) => {
 
     const result = Math.floor(Math.random() * sides) + 1;
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🎲 Dice Roll',
         description: `Rolling a **d${sides}**...\n\n# 🎯 ${result}`,
         color: BRAND.colors.primary,
@@ -1317,7 +1136,7 @@ client.on('messageCreate', async (message) => {
     const text = args.join(' ');
     if (!text) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Mock',
           description: `\`${PREFIX}mock <text>\``,
           color: BRAND.colors.warning,
@@ -1327,7 +1146,7 @@ client.on('messageCreate', async (message) => {
 
     const mocked = text.split('').map((char, i) => i % 2 === 0 ? char.toLowerCase() : char.toUpperCase()).join('');
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🧽 SpOnGeBoB sAyS',
         description: mocked,
         color: BRAND.colors.warning,
@@ -1339,7 +1158,7 @@ client.on('messageCreate', async (message) => {
     const text = args.join(' ');
     if (!text) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Reverse',
           description: `\`${PREFIX}reverse <text>\``,
           color: BRAND.colors.warning,
@@ -1349,7 +1168,7 @@ client.on('messageCreate', async (message) => {
 
     const reversed = [...text].reverse().join('');
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🔄 Reversed',
         description: reversed,
         color: BRAND.colors.info,
@@ -1361,7 +1180,7 @@ client.on('messageCreate', async (message) => {
     const text = args.join(' ');
     if (!text) {
       return message.reply({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '📝 Usage — Emojify',
           description: `\`${PREFIX}emojify <text>\``,
           color: BRAND.colors.warning,
@@ -1393,7 +1212,7 @@ client.on('messageCreate', async (message) => {
     const off = '`🔴 OFF`';
 
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🛡️ Server Protection Status',
         description: 'Current protection module status.',
         color: BRAND.colors.primary,
@@ -1417,7 +1236,7 @@ client.on('messageCreate', async (message) => {
     saveProtection(prot);
     log('mod', `${co.cyan}ANTI-SPAM${co.reset} ${prot.antiSpam.enabled ? 'ENABLED' : 'DISABLED'} by ${message.author.tag}`);
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: `🚫 Anti-Spam ${prot.antiSpam.enabled ? 'Enabled' : 'Disabled'}`,
         description: prot.antiSpam.enabled
           ? `Users sending more than **${prot.antiSpam.maxMessages} messages** in **${prot.antiSpam.interval / 1000}s** will be timed out.`
@@ -1436,7 +1255,7 @@ client.on('messageCreate', async (message) => {
     saveProtection(prot);
     log('mod', `${co.cyan}ANTI-RAID${co.reset} ${prot.antiRaid.enabled ? 'ENABLED' : 'DISABLED'} by ${message.author.tag}`);
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: `⚔️ Anti-Raid ${prot.antiRaid.enabled ? 'Enabled' : 'Disabled'}`,
         description: prot.antiRaid.enabled
           ? `Alerts when more than **${prot.antiRaid.maxJoins} users** join within **${prot.antiRaid.interval / 1000}s**.\nAuto-Lock: **${prot.antiRaid.lockServer ? 'ENABLED' : 'DISABLED'}**`
@@ -1452,7 +1271,7 @@ client.on('messageCreate', async (message) => {
     saveProtection(prot);
     log('mod', `${co.cyan}LOCK-RAID${co.reset} ${prot.antiRaid.lockServer ? 'ENABLED' : 'DISABLED'} by ${message.author.tag}`);
     return message.reply({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: `⚔️ Raid Auto-Lock ${prot.antiRaid.lockServer ? 'Enabled' : 'Disabled'}`,
         description: prot.antiRaid.lockServer
           ? 'The server will automatically remove **Send Messages** permissions from **@everyone** if a raid is detected.'
@@ -1463,61 +1282,67 @@ client.on('messageCreate', async (message) => {
   }
 
   if (command === 'antinuke') {
-  const prot = loadProtection();
-  const toggle = args[0]?.toLowerCase();
-  if (toggle === 'on') prot.antiNuke.enabled = true;
-  else if (toggle === 'off') prot.antiNuke.enabled = false;
-  else prot.antiNuke.enabled = !prot.antiNuke.enabled;
-  saveProtection(prot);
-  log('mod', `${co.cyan}ANTI-NUKE${co.reset} ${prot.antiNuke.enabled ? 'ENABLED' : 'DISABLED'} by ${message.author.tag}`);
-  return message.reply({
-    embeds: [makeEmbed({
-      title: `💣 Anti-Nuke ${prot.antiNuke.enabled ? 'Enabled' : 'Disabled'}`,
-      description: prot.antiNuke.enabled
-        ? `Detects mass channel/role deletions. Offenders will have all roles stripped.`
-        : 'Anti-nuke protection has been disabled.',
-      color: prot.antiNuke.enabled ? BRAND.colors.success : BRAND.colors.danger,
-    })]
-  });
-}
+    const prot = loadProtection();
+    const toggle = args[0]?.toLowerCase();
+    if (toggle === 'on') prot.antiNuke.enabled = true;
+    else if (toggle === 'off') prot.antiNuke.enabled = false;
+    else prot.antiNuke.enabled = !prot.antiNuke.enabled;
+    saveProtection(prot);
+    log('mod', `${co.cyan}ANTI-NUKE${co.reset} ${prot.antiNuke.enabled ? 'ENABLED' : 'DISABLED'} by ${message.author.tag}`);
+    return message.reply({
+      embeds: [
+        makeEmbed(client, {
+          title: `💣 Anti-Nuke ${prot.antiNuke.enabled ? 'Enabled' : 'Disabled'}`,
+          description: prot.antiNuke.enabled
+            ? 'Detects mass channel/role deletions. Offenders will have all roles stripped.'
+            : 'Anti-nuke protection has been disabled.',
+          color: prot.antiNuke.enabled ? BRAND.colors.success : BRAND.colors.danger,
+        }),
+      ],
+    });
+  }
 
-if (command === 'antilink') {
-  const prot = loadProtection();
-  const toggle = args[0]?.toLowerCase();
-  if (toggle === 'on') prot.antiLink.enabled = true;
-  else if (toggle === 'off') prot.antiLink.enabled = false;
-  else prot.antiLink.enabled = !prot.antiLink.enabled;
-  saveProtection(prot);
-  log('mod', `${co.cyan}ANTI-LINK${co.reset} ${prot.antiLink.enabled ? 'ENABLED' : 'DISABLED'} by ${message.author.tag}`);
-  return message.reply({
-    embeds: [makeEmbed({
-      title: `🔗 Anti-Link ${prot.antiLink.enabled ? 'Enabled' : 'Disabled'}`,
-      description: prot.antiLink.enabled
-        ? 'Messages containing links will be auto-deleted (owner & root exempt).'
-        : 'Link filter has been disabled.',
-      color: prot.antiLink.enabled ? BRAND.colors.success : BRAND.colors.danger,
-    })]
-  });
-}
+  if (command === 'antilink') {
+    const prot = loadProtection();
+    const toggle = args[0]?.toLowerCase();
+    if (toggle === 'on') prot.antiLink.enabled = true;
+    else if (toggle === 'off') prot.antiLink.enabled = false;
+    else prot.antiLink.enabled = !prot.antiLink.enabled;
+    saveProtection(prot);
+    log('mod', `${co.cyan}ANTI-LINK${co.reset} ${prot.antiLink.enabled ? 'ENABLED' : 'DISABLED'} by ${message.author.tag}`);
+    return message.reply({
+      embeds: [
+        makeEmbed(client, {
+          title: `🔗 Anti-Link ${prot.antiLink.enabled ? 'Enabled' : 'Disabled'}`,
+          description: prot.antiLink.enabled
+            ? 'Messages containing links will be auto-deleted (owner & root exempt).'
+            : 'Link filter has been disabled.',
+          color: prot.antiLink.enabled ? BRAND.colors.success : BRAND.colors.danger,
+        }),
+      ],
+    });
+  }
 
-if (command === 'ratelimit') {
-  const prot = loadProtection();
-  const toggle = args[0]?.toLowerCase();
-  if (toggle === 'on') prot.rateLimit.enabled = true;
-  else if (toggle === 'off') prot.rateLimit.enabled = false;
-  else prot.rateLimit.enabled = !prot.rateLimit.enabled;
-  saveProtection(prot);
-  log('mod', `${co.cyan}RATE-LIMIT${co.reset} ${prot.rateLimit.enabled ? 'ENABLED' : 'DISABLED'} by ${message.author.tag}`);
-  return message.reply({
-    embeds: [makeEmbed({
-      title: `⏱️ Rate Limit ${prot.rateLimit.enabled ? 'Enabled' : 'Disabled'}`,
-      description: prot.rateLimit.enabled
-        ? `Users will now have a **${prot.rateLimit.cooldown}ms** cooldown between commands.`
-        : 'Command rate limiting has been disabled.',
-      color: prot.rateLimit.enabled ? BRAND.colors.success : BRAND.colors.danger,
-    })]
-  });
-}
+  if (command === 'ratelimit') {
+    const prot = loadProtection();
+    const toggle = args[0]?.toLowerCase();
+    if (toggle === 'on') prot.rateLimit.enabled = true;
+    else if (toggle === 'off') prot.rateLimit.enabled = false;
+    else prot.rateLimit.enabled = !prot.rateLimit.enabled;
+    saveProtection(prot);
+    log('mod', `${co.cyan}RATE-LIMIT${co.reset} ${prot.rateLimit.enabled ? 'ENABLED' : 'DISABLED'} by ${message.author.tag}`);
+    return message.reply({
+      embeds: [
+        makeEmbed(client, {
+          title: `⏱️ Rate Limit ${prot.rateLimit.enabled ? 'Enabled' : 'Disabled'}`,
+          description: prot.rateLimit.enabled
+            ? `Users will now have a **${prot.rateLimit.cooldown}ms** cooldown between commands.`
+            : 'Command rate limiting has been disabled.',
+          color: prot.rateLimit.enabled ? BRAND.colors.success : BRAND.colors.danger,
+        }),
+      ],
+    });
+  }
 });
 
 
@@ -1549,12 +1374,6 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isStringSelectMenu()) {
     if (interaction.customId === 'ticket_create_select') {
       const selectedReason = interaction.values[0];
-      const reasonMap = {
-        support: 'General Support',
-        purchase: 'Purchases & Billing',
-        get_channel: 'Channel Request',
-        report: 'User Report',
-      };
 
       const parentId = config.openCategoryId;
       if (!parentId || !interaction.guild.channels.cache.has(parentId)) {
@@ -1579,7 +1398,9 @@ client.on('interactionCreate', async (interaction) => {
           ],
         });
 
-        const rootRole = interaction.guild.roles.cache.find(r => r.name.toLowerCase() === 'root');
+        const rootRole = interaction.guild.roles.cache.find(
+          (r) => r.name.toLowerCase() === ROOT_ROLE_NAME.toLowerCase()
+        );
         if (rootRole) {
           await ticketChannel.permissionOverwrites.edit(rootRole.id, {
             ViewChannel: true,
@@ -1588,9 +1409,10 @@ client.on('interactionCreate', async (interaction) => {
           });
         }
 
-        const embed = makeEmbed({
-          title: `🎟️ Ticket #${ticketId} — ${reasonMap[selectedReason]}`,
-          description: `Hello ${interaction.user.toString()},\n\nYou selected **${reasonMap[selectedReason]}**.\nPlease describe your request in detail.\nOur support team will respond shortly.\n\nClick the 🔒 button below to close the ticket.`,
+        const reasonLabel = TICKET_REASON_LABELS[selectedReason] || 'Ticket';
+        const embed = makeEmbed(client, {
+          title: `🎟️ Ticket #${ticketId} — ${reasonLabel}`,
+          description: `Hello ${interaction.user.toString()},\n\nYou selected **${reasonLabel}**.\nDescribe your issue and staff will respond when they can.\n\nUse 🔒 below when you are done.`,
           color: BRAND.colors.success,
         });
 
@@ -1603,7 +1425,7 @@ client.on('interactionCreate', async (interaction) => {
         );
 
         await ticketChannel.send({ content: `${interaction.user.toString()}`, embeds: [embed], components: [row] });
-        log('event', `${co.green}TICKET OPEN${co.reset} ${interaction.user.tag} created ${channelName} for ${reasonMap[selectedReason]}`);
+        log('event', `${co.green}TICKET OPEN${co.reset} ${interaction.user.tag} created ${channelName} for ${reasonLabel}`);
 
         return interaction.reply({ content: `✅ Ticket created in ${ticketChannel.toString()}`, ephemeral: true });
       } catch (err) {
@@ -1642,32 +1464,12 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (customId === 'send_ticket_panel') {
-        const G = '\u001b[0;32m';
-        const W = '\u001b[1;37m';
-        const D = '\u001b[0;90m';
-        const C = '\u001b[0;36m';
-        const Y = '\u001b[0;33m';
-        const n = '\u001b[0m';
-        const ticketPanelBody = [
-          '```ansi',
-          `${G}╔═══════════════════════════════════════════╗${n}`,
-          `${G}║${n} ${W}jewishdiscordbot${n}${G} │ ${C}ticket${n}${G} │ ${D}session${n}${G}      ║${n}`,
-          `${G}╚═══════════════════════════════════════════╝${n}`,
-          '',
-          `${D}#${n} ${W}private channel${n} ${D}·${n} ${W}staff notified${n} ${D}·${n} ${W}pick one queue${n}`,
-          '',
-          `${C}~${n} ${W}usage${n}   ${D}···············${n}  ${D}dropdown opens your thread${n}`,
-          `${C}~${n} ${W}slo${n}     ${D}···············${n}  ${Y}< 24h${n} ${D}typical reply${n}`,
-          `${C}~${n} ${W}state${n}   ${D}···············${n}  ${G}online${n}`,
-          '',
-          `${D}$ ${W}./ticket --interactive${n}`,
-          '```',
-        ].join('\n');
-
-        const embed = makeEmbed({
-          title: '`ticket-cli`',
-          description: ticketPanelBody,
-          color: 0x0c1117,
+        const embed = makeEmbed(client, {
+          title: '🎫 Open a ticket',
+          description:
+            'Pick a category below. A private channel will be created for you and staff can follow up there.\n\n' +
+            '**Queues:** support · billing · channel requests · reports',
+          color: BRAND.colors.dark,
           footer: null,
           timestamp: false,
           includeAuthor: false,
@@ -1675,7 +1477,7 @@ client.on('interactionCreate', async (interaction) => {
 
         const selectMenu = new StringSelectMenuBuilder()
           .setCustomId('ticket_create_select')
-          .setPlaceholder('$ ./queue — select…')
+          .setPlaceholder('Choose a category…')
           .addOptions(
             new StringSelectMenuOptionBuilder()
               .setLabel('support')
@@ -1706,15 +1508,13 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
-    // ── Ticket Operation Buttons ──
-
     if (customId === 'ticket_close') {
       await interaction.deferUpdate();
 
       const channel = interaction.channel;
       const closedParentId = config.closedCategoryId;
 
-      const embed = makeEmbed({
+      const embed = makeEmbed(client, {
         title: '🔒 Ticket Closed',
         description: `Ticket closed by **${interaction.user.tag}**.`,
         color: BRAND.colors.warning,
@@ -1795,7 +1595,7 @@ client.on('interactionCreate', async (interaction) => {
         // Also send to logs channel if configured
         if (logChannel) {
           logChannel.send({
-            embeds: [makeEmbed({
+            embeds: [makeEmbed(client, {
               title: `🗃️ Ticket Transcript Generated`,
               description: `Generated from ${channel.toString()} by ${interaction.user.tag}`,
               color: BRAND.colors.info
@@ -1812,125 +1612,6 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 
-
-client.on('messageCreate', async (message) => {
-  if (message.author.bot || !message.guild) return;
-  const prot = loadProtection();
-  if (!prot.antiSpam.enabled) return;
-
-  // Owner and root are exempt
-  if (message.member && isAuthorized(message.member)) return;
-
-  const userId = message.author.id;
-  const now = Date.now();
-
-  if (!spamTracker.has(userId)) spamTracker.set(userId, []);
-  const timestamps = spamTracker.get(userId);
-  timestamps.push(now);
-
-  const filtered = timestamps.filter(t => now - t < prot.antiSpam.interval);
-  spamTracker.set(userId, filtered);
-
-  if (filtered.length >= prot.antiSpam.maxMessages) {
-    spamTracker.delete(userId); // Reset tracker to avoid repeat actions
-
-    log('event', `${co.red}🚫 ANTI-SPAM${co.reset} ${message.author.tag} — ${filtered.length} msgs in ${prot.antiSpam.interval / 1000}s`);
-
-    try {
-      // Delete the spam messages
-      const recentMessages = await message.channel.messages.fetch({ limit: prot.antiSpam.maxMessages + 5 });
-      const spamMessages = recentMessages.filter(m => m.author.id === userId);
-      await message.channel.bulkDelete(spamMessages, true).catch(() => { });
-
-      // Timeout the user
-      if (message.member?.moderatable) {
-        await message.member.timeout(prot.antiSpam.timeoutDuration, 'Anti-Spam: Message flooding');
-      }
-
-      const channel = message.guild.systemChannel || message.channel;
-      channel.send({
-        embeds: [makeEmbed({
-          title: '🚫 Anti-Spam Triggered',
-          description: `**${message.author.tag}** has been timed out for spam.`,
-          color: BRAND.colors.danger,
-          fields: [
-            { name: '👤 User', value: `${message.author.tag}`, inline: true },
-            { name: '⏳ Duration', value: `\`${formatDuration(prot.antiSpam.timeoutDuration)}\``, inline: true },
-            { name: '📝 Reason', value: `${filtered.length} messages in ${prot.antiSpam.interval / 1000}s`, inline: true },
-          ],
-        })]
-      });
-    } catch (err) {
-      log('error', `Anti-spam action failed: ${err.message}`);
-    }
-  }
-});
-
-client.on('messageCreate', async (message) => {
-  if (message.author.bot || !message.guild) return;
-  const prot = loadProtection();
-  if (!prot.antiLink.enabled) return;
-
-  // Owner and root are exempt
-  if (message.member && isAuthorized(message.member)) return;
-
-  const linkRegex = /(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/\S+|(?:https?:\/\/)?(?:www\.)?[a-zA-Z0-9-]+\.(?:com|net|org|edu|gov|mil|biz|info|mobi|name|aero|asia|jobs|museum|gg|io|me|tv|xyz|link|top|pw|club|online|site|store|tech|website|space|fun|host|press|live|icu|vip|work|tk|ml|ga|cf|gq)(?:\/\S*)?/gi;
-  if (linkRegex.test(message.content)) {
-    // Check whitelist
-    const isWhitelisted = prot.antiLink.whitelist?.some(domain => message.content.includes(domain));
-    if (isWhitelisted) return;
-
-    log('event', `${co.red}🔗 ANTI-LINK${co.reset} ${message.author.tag} sent a link in #${message.channel.name}`);
-
-    try {
-      await message.delete();
-      const warn = await message.channel.send({
-        embeds: [makeEmbed({
-          title: '🔗 Link Removed',
-          description: `**${message.author.tag}**, links are not allowed in this server.`,
-          color: BRAND.colors.warning,
-        })]
-      });
-
-      setTimeout(() => warn.delete().catch(() => { }), 5000);
-    } catch (err) {
-      log('error', `Anti-link action failed: ${err.message}`);
-    }
-  }
-});
-
-client.on('messageCreate', async (message) => {
-  if (message.author.bot || !message.guild) return;
-  if (!message.content.startsWith(PREFIX)) return;
-  const prot = loadProtection();
-  if (!prot.rateLimit.enabled) return;
-
-  if (message.member && isAuthorized(message.member)) return;
-
-  const userId = message.author.id;
-  const now = Date.now();
-  const lastUsed = cooldownTracker.get(userId) || 0;
-
-  if (now - lastUsed < prot.rateLimit.cooldown) {
-    const remaining = Math.ceil((prot.rateLimit.cooldown - (now - lastUsed)) / 1000);
-    try {
-      const warn = await message.reply({
-        embeds: [makeEmbed({
-          title: '⏱️ Slow Down!',
-          description: `Please wait **${remaining}s** before using another command.`,
-          color: BRAND.colors.warning,
-        })]
-      });
-      setTimeout(() => warn.delete().catch(() => { }), 3000);
-    } catch { }
-    return;
-  }
-
-  cooldownTracker.set(userId, now);
-});
-
-
-
 client.on('guildMemberAdd', (member) => {
   const blacklist = loadBlacklist();
   const entry = blacklist.find(e => e.userId === member.id);
@@ -1943,7 +1624,7 @@ client.on('guildMemberAdd', (member) => {
         const channel = member.guild.systemChannel;
         if (channel) {
           channel.send({
-            embeds: [makeEmbed({
+            embeds: [makeEmbed(client, {
               title: '🚫 Blacklisted User Auto-Kicked',
               description: `**${member.user.tag}** attempted to join but is blacklisted.`,
               color: BRAND.colors.danger,
@@ -1978,7 +1659,7 @@ client.on('guildMemberAdd', (member) => {
     if (channel) {
       const joinList = joinTracker.map(j => `• **${j.tag}**`).join('\n');
       channel.send({
-        embeds: [makeEmbed({
+        embeds: [makeEmbed(client, {
           title: '⚔️ Raid Detected!',
           description: `**${joinTracker.length} users** joined in under **${prot.antiRaid.interval / 1000} seconds**.\n\n${joinList}`,
           color: BRAND.colors.danger,
@@ -1995,10 +1676,23 @@ client.on('guildMemberAdd', (member) => {
     // Auto-lock server during raid
     if (prot.antiRaid.lockServer) {
       log('event', `${co.red}LOCKDOWN${co.reset} Attempting to lock @everyone permissions due to raid`);
-      const everyone_role = member.guild.roles.everyone;
-      everyone_role.setPermissions(everyone_role.permissions.remove(PermissionFlagsBits.SendMessages))
-        .then(() => log('success', `Locked @everyone permissions`))
-        .catch(err => log('error', `Failed to lock @everyone: ${err.message}`));
+      const everyone = member.guild.roles.everyone;
+      everyone
+        .setPermissions(everyone.permissions.remove(PermissionFlagsBits.SendMessages))
+        .then(() => log('success', 'Locked @everyone send permissions'))
+        .catch((err) => log('error', `Failed to lock @everyone: ${err.message}`));
+    }
+  }
+
+  if (member.user.bot) return;
+  if (entry) return;
+
+  const auto = loadAutoRole();
+  if (auto.roleId) {
+    const role = member.guild.roles.cache.get(auto.roleId);
+    if (role) {
+      member.roles.add(role).catch((err) => log('error', `Failed to assign autorole: ${err.message}`));
+      log('event', `${co.blue}AUTO-ROLE${co.reset} Assigned ${role.name} to ${member.user.tag}`);
     }
   }
 });
@@ -2026,7 +1720,7 @@ client.on('channelDelete', async (channel) => {
     nukeTracker.set(executorId, recent);
 
     if (recent.length >= prot.antiNuke.maxActions) {
-      log('event', `${co.red}${co.bold}💣 NUKE DETECTED${co.reset} ${executor.tag} deleted ${recent.length} channels rapidl`);
+      log('event', `${co.red}${co.bold}💣 NUKE DETECTED${co.reset} ${executor.tag} deleted ${recent.length} channels rapidly`);
       nukeTracker.delete(executorId);
 
 
@@ -2040,7 +1734,7 @@ client.on('channelDelete', async (channel) => {
       const alertChannel = channel.guild.systemChannel || channel.guild.channels.cache.filter(c => c.type === 0).first();
       if (alertChannel) {
         alertChannel.send({
-          embeds: [makeEmbed({
+          embeds: [makeEmbed(client, {
             title: '💣 Nuke Attempt Detected!',
             description: `**${executor.tag}** deleted **${recent.length} channels** rapidly. Their roles have been stripped.`,
             color: BRAND.colors.danger,
@@ -2094,7 +1788,7 @@ client.on('roleDelete', async (role) => {
       const alertChannel = role.guild.systemChannel || role.guild.channels.cache.filter(c => c.type === 0).first();
       if (alertChannel) {
         alertChannel.send({
-          embeds: [makeEmbed({
+          embeds: [makeEmbed(client, {
             title: '💣 Nuke Attempt Detected!',
             description: `**${executor.tag}** deleted **${recent.length} roles** rapidly. Their roles have been stripped.`,
             color: BRAND.colors.danger,
@@ -2140,7 +1834,7 @@ client.on('guildBanAdd', async (ban) => {
       const alertChannel = ban.guild.systemChannel || ban.guild.channels.cache.filter(c => c.type === 0).first();
       if (alertChannel) {
         alertChannel.send({
-          embeds: [makeEmbed({
+          embeds: [makeEmbed(client, {
             title: '💣 Nuke Attempt — Mass Ban',
             description: `**${executor.tag}** banned **${recent.length} members**. All roles removed.`,
             color: BRAND.colors.danger
@@ -2180,7 +1874,7 @@ client.on('guildMemberRemove', async (member) => {
       const alertChannel = member.guild.systemChannel || member.guild.channels.cache.filter(c => c.type === 0).first();
       if (alertChannel) {
         alertChannel.send({
-          embeds: [makeEmbed({
+          embeds: [makeEmbed(client, {
             title: '💣 Nuke Attempt — Mass Kick',
             description: `**${executor.tag}** kicked **${recent.length} members**. All roles removed.`,
             color: BRAND.colors.danger
@@ -2214,7 +1908,7 @@ client.on('messageDelete', async (message) => {
 
   log('event', `${co.magenta}MESSAGE DELETE${co.reset} ${message.author.tag} in #${message.channel.name}`);
   logChannel.send({
-    embeds: [makeEmbed({
+    embeds: [makeEmbed(client, {
       title: '🗑️ Message Deleted',
       description: `A message from **${message.author.tag}** was deleted in <#${message.channel.id}>.`,
       color: BRAND.colors.danger,
@@ -2235,7 +1929,7 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
 
   log('event', `${co.magenta}MESSAGE EDIT${co.reset} ${oldMessage.author.tag} in #${oldMessage.channel.name}`);
   logChannel.send({
-    embeds: [makeEmbed({
+    embeds: [makeEmbed(client, {
       title: '📝 Message Edited',
       description: `**${oldMessage.author.tag}** edited their message in <#${oldMessage.channel.id}>.`,
       color: BRAND.colors.warning,
@@ -2258,7 +1952,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   if (!oldState.channelId && newState.channelId) {
 
     logChannel.send({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🎙️ Voice Join',
         description: `**${member.user.tag}** joined voice channel <#${newState.channelId}>.`,
         color: BRAND.colors.success,
@@ -2267,7 +1961,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   } else if (oldState.channelId && !newState.channelId) {
 
     logChannel.send({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🚪 Voice Leave',
         description: `**${member.user.tag}** left voice channel <#${oldState.channelId}>.`,
         color: BRAND.colors.danger,
@@ -2276,24 +1970,12 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   } else if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
 
     logChannel.send({
-      embeds: [makeEmbed({
+      embeds: [makeEmbed(client, {
         title: '🔄 Voice Move',
         description: `**${member.user.tag}** moved from <#${oldState.channelId}> to <#${newState.channelId}>.`,
         color: BRAND.colors.info,
       })]
     }).catch(() => { });
-  }
-});
-
-client.on('guildMemberAdd', async (member) => {
-  if (member.user.bot) return;
-  const config = loadAutoRole();
-  if (config.roleId) {
-    const role = member.guild.roles.cache.get(config.roleId);
-    if (role) {
-      member.roles.add(role).catch(err => log('error', `Failed to assign autorole: ${err.message}`));
-      log('event', `${co.blue}AUTO-ROLE${co.reset} Assigned ${role.name} to ${member.user.tag}`);
-    }
   }
 });
 
