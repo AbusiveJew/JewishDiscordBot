@@ -17,7 +17,7 @@
     "interval": 10000
   },
   "antiLink": {
-    "enabled": false,
+    "enabled": true,
     "whitelist": []
   },
   "rateLimit": {

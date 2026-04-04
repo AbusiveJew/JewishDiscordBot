@@ -21,7 +21,11 @@ const { GIFEncoder, quantize, applyPalette } = require('gifenc');
 const discordTranscripts = require('discord-html-transcripts');
 
 const PREFIX = process.env.PREFIX || '$';
-const OWNER_USERNAME = process.env.OWNER_USERNAME || 'gal.sys';
+const OWNER_USERNAME = process.env.OWNER_USERNAME || 'owner';
+const AUTHORIZED_USERNAMES = (process.env.AUTHORIZED_USERNAMES || '')
+  .split(',')
+  .map((s) => s.trim().replace(/^@/, '').toLowerCase())
+  .filter(Boolean);
 const BLACKLIST_PATH = path.join(__dirname, 'blacklist.json');
 const PROTECTION_PATH = path.join(__dirname, 'protection.json');
 const TICKETS_PATH = path.join(__dirname, 'tickets_config.json');
@@ -30,7 +34,7 @@ const AUTOROLE_PATH = path.join(__dirname, 'autorole.json');
 
 const BRAND = {
   name: 'JewishDiscordBot',
-  footer: '⚡ Developed by gal.sys',
+  footer: '⚡ JewishDiscordBot',
   colors: {
     primary: 0x5865f2,
     success: 0x57f287,
@@ -109,6 +113,14 @@ function saveProtection(config) {
 
 const DEFAULT_TICKETS = { openCategoryId: null, closedCategoryId: null, ticketCount: 0 };
 
+/** Maps select value → URL-safe channel name prefix (lowercase, hyphens). */
+const TICKET_TYPE_SLUG = {
+  support: 'support',
+  purchase: 'purchase',
+  get_channel: 'get-channel',
+  report: 'report',
+};
+
 function loadTickets() {
   try {
     const data = JSON.parse(fs.readFileSync(TICKETS_PATH, 'utf-8'));
@@ -164,15 +176,24 @@ async function getLogChannel(guild) {
 }
 
 
-function makeEmbed({ title, description, color = BRAND.colors.dark, fields = [], thumbnail = null }) {
-  const embed = new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(description)
-    .setColor(color)
-    .setFooter({ text: BRAND.footer })
-    .setTimestamp();
+function makeEmbed({
+  title,
+  description,
+  color = BRAND.colors.dark,
+  fields = [],
+  thumbnail = null,
+  footer,
+  timestamp: useTimestamp = true,
+  includeAuthor = true,
+}) {
+  const embed = new EmbedBuilder().setTitle(title).setDescription(description).setColor(color);
 
-  embed.setAuthor({ name: BRAND.name, iconURL: client.user?.displayAvatarURL() });
+  const footerText = footer === undefined ? BRAND.footer : footer;
+  if (footerText) embed.setFooter({ text: footerText });
+  if (useTimestamp) embed.setTimestamp();
+  if (includeAuthor && client.user) {
+    embed.setAuthor({ name: BRAND.name, iconURL: client.user.displayAvatarURL() });
+  }
 
   if (fields.length > 0) embed.addFields(fields);
   if (thumbnail) embed.setThumbnail(thumbnail);
@@ -225,7 +246,9 @@ function log(type, message) {
 }
 
 function isAuthorized(member) {
-  if (member.user.username.toLowerCase() === OWNER_USERNAME.toLowerCase()) return true;
+  const u = member.user.username.toLowerCase();
+  if (u === OWNER_USERNAME.toLowerCase()) return true;
+  if (AUTHORIZED_USERNAMES.includes(u)) return true;
   return false;
 }
 
@@ -1527,10 +1550,10 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.customId === 'ticket_create_select') {
       const selectedReason = interaction.values[0];
       const reasonMap = {
-        'support': 'General Support',
-        'purchase': 'Purchases & Billing',
-        'get_channel': 'Channel Request',
-        'report': 'User Report'
+        support: 'General Support',
+        purchase: 'Purchases & Billing',
+        get_channel: 'Channel Request',
+        report: 'User Report',
       };
 
       const parentId = config.openCategoryId;
@@ -1538,10 +1561,11 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: '❌ The ticket system is not configured currently. Contact an administrator.', ephemeral: true });
       }
 
+      const typeSlug = TICKET_TYPE_SLUG[selectedReason] || selectedReason.replace(/_/g, '-');
       config.ticketCount++;
       saveTickets(config);
       const ticketId = config.ticketCount.toString().padStart(4, '0');
-      const channelName = `ticket-${ticketId}`;
+      const channelName = `${typeSlug}-${ticketId}`;
 
       try {
         const ticketChannel = await interaction.guild.channels.create({
@@ -1618,34 +1642,59 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (customId === 'send_ticket_panel') {
+        const G = '\u001b[0;32m';
+        const W = '\u001b[1;37m';
+        const D = '\u001b[0;90m';
+        const C = '\u001b[0;36m';
+        const Y = '\u001b[0;33m';
+        const n = '\u001b[0m';
+        const ticketPanelBody = [
+          '```ansi',
+          `${G}╔═══════════════════════════════════════════╗${n}`,
+          `${G}║${n} ${W}jewishdiscordbot${n}${G} │ ${C}ticket${n}${G} │ ${D}session${n}${G}      ║${n}`,
+          `${G}╚═══════════════════════════════════════════╝${n}`,
+          '',
+          `${D}#${n} ${W}private channel${n} ${D}·${n} ${W}staff notified${n} ${D}·${n} ${W}pick one queue${n}`,
+          '',
+          `${C}~${n} ${W}usage${n}   ${D}···············${n}  ${D}dropdown opens your thread${n}`,
+          `${C}~${n} ${W}slo${n}     ${D}···············${n}  ${Y}< 24h${n} ${D}typical reply${n}`,
+          `${C}~${n} ${W}state${n}   ${D}···············${n}  ${G}online${n}`,
+          '',
+          `${D}$ ${W}./ticket --interactive${n}`,
+          '```',
+        ].join('\n');
+
         const embed = makeEmbed({
-          title: '⛑️ JewishDiscordBot Support Center',
-          description: '> Welcome to the **JewishDiscordBot** support portal.\n> \n> Please use the dropdown below to select the category that best describes your inquiry. This helps us route your request to the appropriate team.\n\n`💡` *Average response time is < 24 hours.*',
-          color: BRAND.colors.dark,
+          title: '`ticket-cli`',
+          description: ticketPanelBody,
+          color: 0x0c1117,
+          footer: null,
+          timestamp: false,
+          includeAuthor: false,
         });
 
         const selectMenu = new StringSelectMenuBuilder()
           .setCustomId('ticket_create_select')
-          .setPlaceholder('Make a selection...')
+          .setPlaceholder('$ ./queue — select…')
           .addOptions(
             new StringSelectMenuOptionBuilder()
-              .setLabel('General Support')
-              .setDescription('Assistance with rules, roles, or server help')
+              .setLabel('support')
+              .setDescription('rules · roles · general help')
               .setValue('support')
               .setEmoji('🛡️'),
             new StringSelectMenuOptionBuilder()
-              .setLabel('Purchases & Billing')
-              .setDescription('Inquiries regarding payments or upgrades')
+              .setLabel('purchase')
+              .setDescription('payments · billing · upgrades')
               .setValue('purchase')
               .setEmoji('💳'),
             new StringSelectMenuOptionBuilder()
-              .setLabel('Channel Request')
-              .setDescription('Request a private text or voice channel')
+              .setLabel('channel')
+              .setDescription('request a private text/voice channel')
               .setValue('get_channel')
               .setEmoji('💬'),
             new StringSelectMenuOptionBuilder()
-              .setLabel('User Report')
-              .setDescription('Report a member for breaking the rules')
+              .setLabel('report')
+              .setDescription('report a member · rule violations')
               .setValue('report')
               .setEmoji('⚠️')
           );
@@ -1697,9 +1746,14 @@ client.on('interactionCreate', async (interaction) => {
         if (closedParentId && channel.guild.channels.cache.has(closedParentId)) {
           await channel.setParent(closedParentId, { lockPermissions: false });
         }
-        await channel.setName(channel.name.replace('ticket', 'closed'));
+        // e.g. support-0001 → closed-0001 (same pattern as old ticket-0001 → closed-0001)
+        const closedNameMatch = channel.name.match(/^([a-z0-9-]+)-(\d{4})$/);
+        const closedChannelName = closedNameMatch
+          ? `closed-${closedNameMatch[2]}`
+          : channel.name.replace(/^([a-z0-9-]+)-/, 'closed-');
+        await channel.setName(closedChannelName);
 
-        log('event', `${co.yellow}TICKET CLOSED${co.reset} by ${interaction.user.tag} in #${channel.name}`);
+        log('event', `${co.yellow}TICKET CLOSED${co.reset} by ${interaction.user.tag} in #${closedChannelName}`);
       } catch (err) {
         log('error', `Ticket closing failed: ${err.message}`);
       }

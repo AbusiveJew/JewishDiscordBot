@@ -1,3 +1,9 @@
 node_modules/
 .env
 blacklist.json
+
+# IDE / OS
+.vs/
+*.log
+.DS_Store
+Thumbs.db
